@@ -21,6 +21,10 @@ repositories {
 	}
 }
 
+configurations {
+	mockitoAgent
+}
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -30,6 +34,7 @@ dependencies {
 	testImplementation platform('org.junit:junit-bom:5.13.4')
 	testImplementation 'org.junit.jupiter:junit-jupiter'
 	testImplementation 'org.mockito:mockito-core:5.23.0'
+	mockitoAgent('org.mockito:mockito-core:5.23.0') { transitive = false }
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -82,6 +87,8 @@ sourceSets.test {
 
 test {
 	useJUnitPlatform()
+	// Load instrumentation at startup; dynamic self-attachment can fail on JDK 25.
+	jvmArgs "-javaagent:${configurations.mockitoAgent.asPath}"
 	maxHeapSize = '2g'
 	systemProperty 'fabric.side', 'client'
 	systemProperty 'java.awt.headless', 'true'

@@ -83,13 +83,13 @@ public final class UserNameCache {
             JsonArray arr = JsonParser.parseString(text).getAsJsonArray();
             List<NameAndId> out = new ArrayList<>(arr.size());
             for (JsonElement el : arr) {
-                JsonObject o = el.getAsJsonObject();
-                String name = o.has("name") ? o.get("name").getAsString() : null;
-                String uuid = o.has("uuid") ? o.get("uuid").getAsString() : null;
-                if (name == null || uuid == null || name.isEmpty()) {
-                    continue;
-                }
                 try {
+                    if (!el.isJsonObject()) continue;
+                    JsonObject o = el.getAsJsonObject();
+                    if (!isString(o.get("name")) || !isString(o.get("uuid"))) continue;
+                    String name = o.get("name").getAsString();
+                    String uuid = o.get("uuid").getAsString();
+                    if (name.isBlank()) continue;
                     out.add(new NameAndId(UUID.fromString(uuid), name));
                 } catch (IllegalArgumentException ignored) {
                     // 跳过坏行
@@ -99,5 +99,9 @@ public final class UserNameCache {
         } catch (Exception e) {
             return List.of();
         }
+    }
+
+    private static boolean isString(JsonElement value) {
+        return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString();
     }
 }

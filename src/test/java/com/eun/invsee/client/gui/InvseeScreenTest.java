@@ -22,14 +22,19 @@ import net.minecraft.network.chat.FormattedText;
 import net.minecraft.network.chat.Style;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.ItemContainerContents;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Deque;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -199,6 +204,100 @@ class InvseeScreenTest {
         screen.tick();
         assertFalse((boolean) get(screen, "loading"));
         assertEquals(-1L, get(screen, "pendingId"));
+    }
+
+    static Stream<Arguments> containerShapes() {
+        return Stream.of(
+                Arguments.of(Items.HOPPER, "漏斗", "hopper", new int[][]{{0, 1, 2, 3, 4}}),
+                Arguments.of(Items.DROPPER, "投掷器", "dropper", new int[][]{{0, 1, 2}, {3, 4, 5}, {6, 7, 8}}),
+                Arguments.of(Items.FURNACE, "熔炉", "furnace", new int[][]{{0, -1, -1, -1}, {-1, -1, -1, 2}, {1, -1, -1, -1}}),
+                Arguments.of(Items.BREWING_STAND, "酿造台", "brewing", new int[][]{{4, -1, 3, -1}, {-1, -1, -1, -1}, {-1, 0, 1, 2}}),
+                Arguments.of(Items.CHISELED_BOOKSHELF, "雕纹书架", "bookshelf", new int[][]{{0, 1, 2}, {3, 4, 5}}),
+                Arguments.of(Items.DECORATED_POT, "饰纹陶罐", "pot", new int[][]{{0}}));
+    }
+
+    void inspectContainer(ItemStack container) throws Exception {
+        var inventory = InventorySnapshot.emptySlots(36);
+        inventory.set(20, container);
+        respond(new InventorySnapshot("Alex", false, 1, 1, -1, inventory,
+                InventorySnapshot.emptySlots(6), InventorySnapshot.emptySlots(27)), 1);
+        var layout = (InvseeLayout) get(screen, "layout");
+        screen.mouseClicked(new MouseButtonEvent(layout.viewport().x() + layout.gridX(layout.inventory()) + 49,
+                layout.viewport().y() + 57, new MouseButtonInfo(1, 0)), false);
+    }
+
+    Object call(String name, Class<?>[] types, Object... args) throws Exception {
+        var method = InvseeScreen.class.getDeclaredMethod(name, types);
+        method.setAccessible(true);
+        return method.invoke(screen, args);
+    }
+
+    @ParameterizedTest @MethodSource("containerShapes")
+    void popupDrawsAndHitsOnlyActualSlotsAndCanOpenTheLastSlot(Item item, String name, String file, int[][] cells) throws Exception {
+        int capacity = (int) java.util.Arrays.stream(cells).flatMapToInt(java.util.Arrays::stream).filter(i -> i >= 0).count();
+        var inside = InventorySnapshot.emptySlots(capacity);
+        inside.set(0, new ItemStack(Items.DIAMOND, 32));
+        inside.set(capacity - 1, new ItemStack(Items.SHULKER_BOX));
+        ItemStack container = new ItemStack(item);
+        container.set(DataComponents.CUSTOM_NAME, Component.literal(name));
+        container.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(inside));
+        inspectContainer(container);
+        var previews = (Deque<?>) get(screen, "previews");
+        assertEquals(capacity, ((java.util.List<?>) get(previews.peek(), "slots")).size());
+        var rect = (InvseeLayout.Rect) call("previewRect", new Class<?>[]{});
+        int left = rect.x() + (rect.width() - cells[0].length * InvseeLayout.CELL) / 2;
+        int top = rect.y() + 50;
+        int lastX = 0, lastY = 0;
+        for (int row = 0; row < cells.length; row++) {
+            for (int col = 0; col < cells[row].length; col++) {
+                int x = left + col * InvseeLayout.CELL + 5, y = top + row * InvseeLayout.CELL + 5;
+                assertEquals(cells[row][col], call("hoveredPreviewIndex", new Class<?>[]{double.class, double.class}, (double) x, (double) y));
+                if (cells[row][col] == capacity - 1) { lastX = x; lastY = y; }
+                else {
+                    screen.mouseClicked(new MouseButtonEvent(x, y, new MouseButtonInfo(1, 0)), false);
+                    assertEquals(1, previews.size(), "Empty slots and layout gaps must not open a container");
+                }
+            }
+        }
+        GuiGraphicsExtractor graphics = mock(GuiGraphicsExtractor.class);
+        call("renderPreview", new Class<?>[]{GuiGraphicsExtractor.class, int.class, int.class, float.class}, graphics, -1, -1, 0f);
+        verify(graphics, times(capacity * 2)).fill(anyInt(), anyInt(), anyInt(), anyInt(), eq(InvseeTheme.SLOT));
+        try (var renderer = new SoftwarePreview(640, 360)) {
+            renderer.installLanguage();
+            screen.extractRenderState(renderer.graphics(), -1, -1, 0);
+            renderer.save(file + ".png");
+        }
+        screen.mouseClicked(new MouseButtonEvent(lastX, lastY, new MouseButtonInfo(1, 0)), false);
+        assertEquals(2, previews.size());
+        assertEquals(27, ((java.util.List<?>) get(previews.peek(), "slots")).size());
+        screen.keyPressed(new KeyEvent(256, 0, 0));
+        assertEquals(1, previews.size());
+        network.verifyNoInteractions();
+    }
+
+    @Test void scrollingPartialLastRowAndResizingKeepsLastItemAccessible() throws Exception {
+        ItemStack container = new ItemStack(Items.STONE);
+        var inside = InventorySnapshot.emptySlots(56);
+        inside.set(55, new ItemStack(Items.SHULKER_BOX));
+        container.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(inside));
+        inspectContainer(container);
+        screen.width = 320;
+        screen.height = 240;
+        rebuild();
+        for (int i = 0; i < 10; i++) screen.mouseScrolled(160, 120, 0, -1);
+        var previews = (Deque<?>) get(screen, "previews");
+        assertEquals(1, get(previews.peek(), "scrollRow"));
+        var rect = (InvseeLayout.Rect) call("previewRect", new Class<?>[]{});
+        int left = rect.x() + (rect.width() - InvseeLayout.GRID_WIDTH) / 2;
+        double y = rect.y() + 50 + 5 * InvseeLayout.CELL + 5;
+        assertEquals(55, call("hoveredPreviewIndex", new Class<?>[]{double.class, double.class}, (double) left + 27, y));
+        assertEquals(-1, call("hoveredPreviewIndex", new Class<?>[]{double.class, double.class}, (double) left + 49, y));
+        screen.mouseClicked(new MouseButtonEvent(left + 49, y, new MouseButtonInfo(1, 0)), false);
+        assertEquals(1, previews.size());
+        screen.mouseClicked(new MouseButtonEvent(left + 27, y, new MouseButtonInfo(1, 0)), false);
+        assertEquals(2, previews.size());
+        screen.keyPressed(new KeyEvent(256, 0, 0));
+        assertEquals(1, get(previews.peek(), "scrollRow"));
     }
 
     @Test void exportJavaRenderedLayoutPreviews() throws Exception {

@@ -1,6 +1,7 @@
 package com.eun.invsee.client.gui;
 
 import com.eun.invsee.client.net.ClientInvseeNet;
+import com.eun.invsee.data.ContainerLayout;
 import com.eun.invsee.data.InventorySnapshot;
 import com.google.gson.JsonObject;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -53,10 +54,12 @@ public class InvseeScreen extends Screen {
     private static final class Preview {
         final ItemStack parent;
         final List<ItemStack> slots;
+        final ContainerLayout layout;
         int scrollRow;
         Preview(ItemStack stack) {
             parent = stack;
             slots = InventorySnapshot.containerSlots(stack);
+            layout = ContainerLayout.of(stack, slots.size());
         }
     }
 
@@ -315,7 +318,7 @@ public class InvseeScreen extends Screen {
     public boolean mouseScrolled(double x, double y, double horizontal, double vertical) {
         if (!previews.isEmpty()) {
             Preview preview = previews.peek();
-            int max = Math.max(0, preview.slots.size() / 9 - previewRows());
+            int max = Math.max(0, preview.layout.rows() - previewRows());
             preview.scrollRow = Math.max(0, Math.min(max, preview.scrollRow - (int) Math.signum(vertical)));
             return true;
         }
@@ -485,7 +488,7 @@ public class InvseeScreen extends Screen {
 
     private int previewRows() {
         if (previews.isEmpty()) return 3;
-        return Math.max(1, Math.min(previews.peek().slots.size() / 9, Math.min(6, (height - 100) / InvseeLayout.CELL)));
+        return Math.max(1, Math.min(previews.peek().layout.rows(), Math.min(6, (height - 100) / InvseeLayout.CELL)));
     }
 
     private InvseeLayout.Rect previewRect() {
@@ -497,7 +500,7 @@ public class InvseeScreen extends Screen {
     private void placePreviewButtons() {
         if (!previews.isEmpty()) {
             Preview current = previews.peek();
-            current.scrollRow = Math.min(current.scrollRow, Math.max(0, current.slots.size() / 9 - previewRows()));
+            current.scrollRow = Math.min(current.scrollRow, Math.max(0, current.layout.rows() - previewRows()));
         }
         var r = previewRect();
         backButton.setX(r.x() + 10);
@@ -506,16 +509,23 @@ public class InvseeScreen extends Screen {
         dismissButton.setY(r.y() + 8);
     }
 
-    private ItemStack hoveredPreviewStack(double x, double y) {
-        if (previews.isEmpty()) return ItemStack.EMPTY;
+    private int hoveredPreviewIndex(double x, double y) {
+        if (previews.isEmpty()) return -1;
+        Preview preview = previews.peek();
         var r = previewRect();
-        int left = r.x() + (r.width() - InvseeLayout.GRID_WIDTH) / 2;
+        int gridWidth = preview.layout.columns() * InvseeLayout.CELL;
+        int left = r.x() + (r.width() - gridWidth) / 2;
         int top = r.y() + 50;
-        var grid = new InvseeLayout.Rect(left, top, InvseeLayout.GRID_WIDTH, previewRows() * InvseeLayout.CELL);
-        if (!grid.contains(x, y)) return ItemStack.EMPTY;
+        var grid = new InvseeLayout.Rect(left, top, gridWidth, previewRows() * InvseeLayout.CELL);
+        if (!grid.contains(x, y)) return -1;
         int col = (int) (x - left) / InvseeLayout.CELL;
-        int row = (int) (y - top) / InvseeLayout.CELL + previews.peek().scrollRow;
-        return previews.peek().slots.get(row * 9 + col);
+        int row = (int) (y - top) / InvseeLayout.CELL + preview.scrollRow;
+        return preview.layout.indexAt(col, row);
+    }
+
+    private ItemStack hoveredPreviewStack(double x, double y) {
+        int index = hoveredPreviewIndex(x, y);
+        return index < 0 ? ItemStack.EMPTY : previews.peek().slots.get(index);
     }
 
     private void renderPreview(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
@@ -527,23 +537,33 @@ public class InvseeScreen extends Screen {
         surface(g, r.x(), r.y(), r.width(), r.height(), PANEL, 0xFF78658E);
         centeredFit(g, t("container_title"), r.x() + r.width() / 2, r.y() + 14, r.width() - 76, PURPLE);
         centeredFit(g, preview.parent.getHoverName(), r.x() + r.width() / 2, r.y() + 35, r.width() - 24, TEXT);
-        int left = r.x() + (r.width() - InvseeLayout.GRID_WIDTH) / 2;
-        ItemStack hovered = hoveredPreviewStack(mouseX, mouseY);
-        int first = preview.scrollRow * 9;
-        int shown = previewRows() * 9;
-        for (int i = 0; i < shown; i++) {
-            ItemStack stack = preview.slots.get(first + i);
-            drawSlot(g, left + i % 9 * InvseeLayout.CELL, r.y() + 50 + i / 9 * InvseeLayout.CELL,
-                    stack, !stack.isEmpty() && stack == hovered, false);
+        int left = r.x() + (r.width() - preview.layout.columns() * InvseeLayout.CELL) / 2;
+        int hovered = hoveredPreviewIndex(mouseX, mouseY);
+        for (int i = 0; i < preview.slots.size(); i++) {
+            var position = preview.layout.positions().get(i);
+            int row = position.row() - preview.scrollRow;
+            if (row < 0 || row >= previewRows()) continue;
+            drawSlot(g, left + position.column() * InvseeLayout.CELL, r.y() + 50 + row * InvseeLayout.CELL,
+                    preview.slots.get(i), i == hovered, false);
         }
-        Component count = t("container_count", InventorySnapshot.occupied(preview.slots), preview.slots.size());
-        if (preview.slots.size() > shown) {
-            count = t("container_scroll", preview.scrollRow + 1, preview.slots.size() / 9);
+        if (preview.slots.isEmpty()) {
+            centeredFit(g, t("container_no_data"), r.x() + r.width() / 2, r.y() + 57, r.width() - 24, MUTED);
         }
+        Component count = preview.layout.exactCapacity()
+                ? t("container_count", InventorySnapshot.occupied(preview.slots), preview.slots.size())
+                : t("container_recorded", preview.slots.size());
         centeredFit(g, count, r.x() + r.width() / 2, r.bottom() - 19, r.width() - 16, MUTED);
+        if (preview.layout.rows() > previewRows()) {
+            centeredFit(g, t("container_scroll", preview.scrollRow + 1, preview.layout.rows()),
+                    r.x() + r.width() / 2, r.bottom() + 6, r.width(), MUTED);
+        }
         backButton.extractRenderState(g, mouseX, mouseY, partialTick);
         dismissButton.extractRenderState(g, mouseX, mouseY, partialTick);
-        if (!hovered.isEmpty()) showTooltip(g, hovered, t("container_item"), mouseX, mouseY);
+        if (hovered >= 0) {
+            String role = preview.layout.positions().get(hovered).role();
+            Component label = role.isEmpty() ? t("container_slot", hovered + 1) : t("slot_" + role);
+            showTooltip(g, preview.slots.get(hovered), label, mouseX, mouseY);
+        }
     }
 
     private void showTooltip(GuiGraphicsExtractor g, ItemStack stack, Component location, int mouseX, int mouseY) {

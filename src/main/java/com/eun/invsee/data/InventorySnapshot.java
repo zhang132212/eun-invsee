@@ -44,17 +44,16 @@ public record InventorySnapshot(String target, boolean online, long savedAt, lon
     }
 
     public static boolean isContainer(ItemStack stack) {
-        return !stack.isEmpty() && stack.get(DataComponents.CONTAINER) != null;
+        return !stack.isEmpty() && (stack.get(DataComponents.CONTAINER) != null
+                || ContainerLayout.kind(stack) != ContainerLayout.Kind.UNKNOWN);
     }
 
-    /** Preserve holes, including an empty shulker box. Larger modded containers retain every slot. */
+    /** Fill only the real capacity, preserving holes and any extra recorded slots without data loss. */
     public static List<ItemStack> containerSlots(ItemStack stack) {
+        if (!isContainer(stack)) return List.of();
         ItemContainerContents contents = stack.get(DataComponents.CONTAINER);
-        if (contents == null) {
-            return List.of();
-        }
-        List<ItemStack> items = contents.allItemsCopyStream().toList();
-        int size = Math.max(27, ((items.size() + 8) / 9) * 9);
+        List<ItemStack> items = contents == null ? List.of() : contents.allItemsCopyStream().toList();
+        int size = Math.max(ContainerLayout.kind(stack).capacity(), items.size());
         List<ItemStack> slots = emptySlots(size);
         for (int i = 0; i < items.size(); i++) {
             slots.set(i, items.get(i));

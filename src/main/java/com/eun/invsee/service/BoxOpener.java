@@ -1,18 +1,15 @@
 package com.eun.invsee.service;
 
 import com.eun.invsee.data.InventorySnapshot;
+import com.eun.invsee.data.ContainerLayout;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.Container;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
-import net.minecraft.world.inventory.ChestMenu;
-import net.minecraft.world.inventory.ContainerInput;
-import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 
 /** Vanilla-client fallback for /invsee box. The displayed container contains only detached copies. */
@@ -38,8 +35,9 @@ public final class BoxOpener {
                 return 0;
             }
             var contents = InventorySnapshot.containerSlots(stack);
-            if (contents.size() > 54) {
-                source.sendFailure(Component.literal("容器超过 54 格，请使用 R 键界面查看完整内容。"));
+            var layout = ContainerLayout.of(stack, contents.size());
+            if (ReadOnlyContainerMenu.menuType(layout) == null) {
+                source.sendFailure(Component.literal("此容器没有匹配的原版预览菜单，请安装客户端模组并使用 R 键界面查看完整内容。"));
                 return 0;
             }
             SimpleContainer copy = new SimpleContainer(contents.size());
@@ -49,7 +47,7 @@ public final class BoxOpener {
                     return Component.literal(snapshot.target() + " · ").append(stack.getHoverName()).append("（只读）");
                 }
                 @Override public AbstractContainerMenu createMenu(int syncId, Inventory inventory, Player player) {
-                    return new ReadOnlyChestMenu(syncId, inventory, copy, contents.size() / 9);
+                    return new ReadOnlyContainerMenu(syncId, inventory, copy, layout);
                 }
             });
             return 1;
@@ -59,17 +57,4 @@ public final class BoxOpener {
         }
     }
 
-    private static final class ReadOnlyChestMenu extends ChestMenu {
-        ReadOnlyChestMenu(int syncId, Inventory inventory, Container box, int rows) {
-            super(switch (rows) {
-                case 4 -> MenuType.GENERIC_9x4;
-                case 5 -> MenuType.GENERIC_9x5;
-                case 6 -> MenuType.GENERIC_9x6;
-                default -> MenuType.GENERIC_9x3;
-            }, syncId, inventory, box, rows);
-        }
-
-        @Override public void clicked(int slotId, int button, ContainerInput input, Player player) {}
-        @Override public ItemStack quickMoveStack(Player player, int index) { return ItemStack.EMPTY; }
-    }
 }
