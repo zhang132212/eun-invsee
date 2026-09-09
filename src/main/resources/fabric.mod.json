@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "eun_invsee",
+  "version": "${version}",
+  "name": "EUN Invsee",
+  "description": "背包查看(双端)：服务端 OP 用 /invsee 查看在线/离线玩家背包；配套客户端界面(按 P 打开)可查玩家背包并点开潜影盒等容器。全程只读。",
+  "authors": [
+    "zhang132212"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.eun.invsee.InvseeMod"
+    ],
+    "client": [
+      "com.eun.invsee.client.InvseeClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": ">=${fabric_api_version}",
+    "minecraft": "~${minecraft_dependency}",
+    "java": ">=25"
+  }
+}
