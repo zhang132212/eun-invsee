@@ -1,19 +1,13 @@
 package com.eun.invsee.service;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import com.eun.invsee.data.InventorySnapshot;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.world.inventory.PlayerEnderChestContainer;
 import net.minecraft.world.item.ItemStack;
 
 import java.time.Instant;
@@ -23,9 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 把"在线实体"或"离线存档 NBT"统一解析为：
- *  1) 聊天行（服务端 /invsee 文字版）
- *  2) 结构化 JSON（双端客户端界面版）
+ * 聊天指令视图，和 GUI 共用 SnapshotReader 的物品解析与槽位模型。
  * 只读：任何路径都不写背包/存档。
  */
 public final class PlayerViews {
@@ -44,50 +36,8 @@ public final class PlayerViews {
         return lines;
     }
 
-    public static String jsonOnline(ServerPlayer p, MinecraftServer server) {
-        Collector c = collectOnline(p, server);
-        return toJson(c, p.getGameProfile().name(), true, -1);
-    }
-
     private static Collector collectOnline(ServerPlayer p, MinecraftServer server) {
-        Collector c = new Collector();
-        c.selected = p.getInventory().getSelectedSlot();
-
-        Inventory inv = p.getInventory();
-        for (int i = 0; i < 36; i++) {
-            ItemStack st = inv.getItem(i);
-            if (!st.isEmpty()) {
-                c.addBySlot(i, ItemView.fromStack(st, server));
-            }
-        }
-        addEquipLive(c, p, EquipmentSlot.HEAD, "头盔", server);
-        addEquipLive(c, p, EquipmentSlot.CHEST, "胸甲", server);
-        addEquipLive(c, p, EquipmentSlot.LEGS, "护腿", server);
-        addEquipLive(c, p, EquipmentSlot.FEET, "靴子", server);
-        addEquipLive(c, p, EquipmentSlot.BODY, "身体", server);
-        ItemStack off = p.getItemBySlot(EquipmentSlot.OFFHAND);
-        if (!off.isEmpty()) {
-            c.offhand = ItemView.fromStack(off, server);
-        }
-
-        PlayerEnderChestContainer ender = p.getEnderChestInventory();
-        int es = Math.min(ender.getContainerSize(), 27);
-        for (int i = 0; i < es; i++) {
-            ItemStack st = ender.getItem(i);
-            if (!st.isEmpty()) {
-                c.ender[i] = ItemView.fromStack(st, server);
-                c.enderFilled++;
-            }
-        }
-        return c;
-    }
-
-    private static void addEquipLive(Collector c, ServerPlayer p, EquipmentSlot slot, String label,
-                                     MinecraftServer server) {
-        ItemStack st = p.getItemBySlot(slot);
-        if (!st.isEmpty()) {
-            c.armor.add(new Labeled(label, slot.getSerializedName(), ItemView.fromStack(st, server)));
-        }
+        return collect(SnapshotReader.online(p), server);
     }
 
     // ================= 离线 =================
@@ -100,186 +50,33 @@ public final class PlayerViews {
         return lines;
     }
 
-    public static String jsonOffline(CompoundTag root, MinecraftServer server, long savedAtMs, String name) {
-        Collector c = collectOffline(root, server);
-        return toJson(c, name, false, savedAtMs);
+    private static Collector collectOffline(CompoundTag root, MinecraftServer server) {
+        return collect(SnapshotReader.offline(root, server.registryAccess(), -1, ""), server);
     }
 
-    private static Collector collectOffline(CompoundTag root, MinecraftServer server) {
+    private static Collector collect(InventorySnapshot snapshot, MinecraftServer server) {
         Collector c = new Collector();
-        c.selected = root.getIntOr("SelectedItemSlot", -1);
-
-        ListTag invList = root.getListOrEmpty("Inventory");
-        for (int i = 0; i < invList.size(); i++) {
-            Tag t = invList.get(i);
-            if (!(t instanceof CompoundTag entry)) {
-                continue;
-            }
-            int slot = entry.contains("Slot") ? (entry.getByteOr("Slot", (byte) 0) & 0xFF) : i;
-            String id = entry.getStringOr("id", "minecraft:air");
-            if (id.equals("minecraft:air") || entry.getIntOr("count", 0) <= 0) {
-                continue;
-            }
-            c.addBySlot(slot, ItemView.fromItemCompound(entry, server));
+        c.selected = snapshot.selected();
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = snapshot.inventory().get(i);
+            if (!stack.isEmpty()) c.addBySlot(i, ItemView.fromStack(stack, server));
         }
-
-        CompoundTag eq = root.getCompoundOrEmpty("equipment");
-        addEquipTag(c, eq, EquipmentSlot.HEAD, "头盔", server);
-        addEquipTag(c, eq, EquipmentSlot.CHEST, "胸甲", server);
-        addEquipTag(c, eq, EquipmentSlot.LEGS, "护腿", server);
-        addEquipTag(c, eq, EquipmentSlot.FEET, "靴子", server);
-        addEquipTag(c, eq, EquipmentSlot.BODY, "身体", server);
-        addEquipTag(c, eq, EquipmentSlot.OFFHAND, "副手", server);
-
-        ListTag enderList = root.getListOrEmpty("EnderItems");
-        for (int i = 0; i < enderList.size(); i++) {
-            Tag t = enderList.get(i);
-            if (!(t instanceof CompoundTag entry)) {
-                continue;
-            }
-            int slot = entry.contains("Slot") ? (entry.getByteOr("Slot", (byte) 0) & 0xFF) : i;
-            if (slot < 0 || slot >= 27) {
-                continue;
-            }
-            String id = entry.getStringOr("id", "minecraft:air");
-            if (id.equals("minecraft:air") || entry.getIntOr("count", 0) <= 0) {
-                continue;
-            }
-            if (c.ender[slot] == null) {
-                c.ender[slot] = ItemView.fromItemCompound(entry, server);
+        String[] labels = {"头盔", "胸甲", "护腿", "靴子", "身体", "副手"};
+        for (int i = 0; i < 6; i++) {
+            ItemStack stack = snapshot.equipment().get(i);
+            if (stack.isEmpty()) continue;
+            ItemView view = ItemView.fromStack(stack, server);
+            if (i == 5) c.offhand = view;
+            else c.armor.add(new Labeled(labels[i], InventorySnapshot.EQUIPMENT_KEYS.get(i), view));
+        }
+        for (int i = 0; i < 27; i++) {
+            ItemStack stack = snapshot.ender().get(i);
+            if (!stack.isEmpty()) {
+                c.ender[i] = ItemView.fromStack(stack, server);
                 c.enderFilled++;
             }
         }
         return c;
-    }
-
-    private static void addEquipTag(Collector c, CompoundTag eq, EquipmentSlot slot, String label,
-                                    MinecraftServer server) {
-        String key = slot.getSerializedName();
-        if (!eq.contains(key)) {
-            return;
-        }
-        CompoundTag it = eq.getCompoundOrEmpty(key);
-        String id = it.getStringOr("id", "minecraft:air");
-        if (id.equals("minecraft:air") || it.getIntOr("count", 0) <= 0) {
-            return;
-        }
-        ItemView iv = ItemView.fromItemCompound(it, server);
-        if (slot == EquipmentSlot.OFFHAND) {
-            c.offhand = iv;
-        } else {
-            c.armor.add(new Labeled(label, key, iv));
-        }
-    }
-
-    // ================= JSON（双端客户端界面） =================
-
-    private static String toJson(Collector c, String name, boolean online, long savedAtMs) {
-        JsonObject root = new JsonObject();
-        root.addProperty("ok", true);
-        root.addProperty("target", name);
-        root.addProperty("online", online);
-        root.addProperty("savedAt", savedAtMs);
-        JsonArray groups = new JsonArray();
-
-        // 快捷栏
-        JsonObject hot = group("快捷栏", "hot", c.hotFilled, 9);
-        for (int i = 0; i < 9; i++) {
-            ItemView iv = c.hot[i];
-            if (iv != null) {
-                hot.getAsJsonArray("rows").add(rowJson("快" + (i + 1), "h" + i, iv, i == c.selected));
-            }
-        }
-        groups.add(hot);
-
-        // 背包
-        JsonObject main = group("背包", "main", c.mainFilled, 27);
-        for (int i = 0; i < 27; i++) {
-            ItemView iv = c.main[i];
-            if (iv != null) {
-                main.getAsJsonArray("rows").add(rowJson("包" + (i + 1), "m" + i, iv, false));
-            }
-        }
-        groups.add(main);
-
-        // 装备
-        JsonObject armor = group("装备", "armor", c.armor.size(), 0);
-        for (Labeled l : c.armor) {
-            armor.getAsJsonArray("rows").add(rowJson(l.label(), l.code(), l.view(), false));
-        }
-        groups.add(armor);
-
-        // 副手
-        JsonObject off = group("副手", "offhand", c.offhand == null ? 0 : 1, 0);
-        if (c.offhand != null) {
-            off.getAsJsonArray("rows").add(rowJson("副手", "offhand", c.offhand, false));
-        }
-        groups.add(off);
-
-        // 末影箱
-        JsonObject ender = group("末影箱", "ender", c.enderFilled, 27);
-        for (int i = 0; i < 27; i++) {
-            ItemView iv = c.ender[i];
-            if (iv != null) {
-                ender.getAsJsonArray("rows").add(rowJson("末" + (i + 1), "e" + i, iv, false));
-            }
-        }
-        groups.add(ender);
-
-        root.add("groups", groups);
-        return root.toString();
-    }
-
-    private static JsonObject group(String title, String kind, int filled, int cap) {
-        JsonObject g = new JsonObject();
-        g.addProperty("title", title);
-        g.addProperty("kind", kind);
-        g.addProperty("filled", filled);
-        g.addProperty("cap", cap);
-        g.add("rows", new JsonArray());
-        return g;
-    }
-
-    private static JsonObject rowJson(String label, String code, ItemView iv, boolean selected) {
-        JsonObject r = new JsonObject();
-        r.addProperty("label", label);
-        r.addProperty("code", code);
-        r.addProperty("id", iv.itemId);
-        r.addProperty("count", iv.count);
-        if (iv.customText != null && !iv.customText.isEmpty()) {
-            r.addProperty("custom", iv.customText);
-        }
-        if (selected) {
-            r.addProperty("sel", true);
-        }
-        if (iv.damage >= 0) {
-            r.addProperty("dmg", iv.damage);
-        }
-        if (!iv.enchants.isEmpty()) {
-            JsonArray ench = new JsonArray();
-            for (ItemView.EnchantInfo e : iv.enchants) {
-                JsonObject eo = new JsonObject();
-                eo.addProperty("k", e.key());
-                eo.addProperty("l", e.level());
-                ench.add(eo);
-            }
-            r.add("ench", ench);
-        }
-        if (iv.innerTotal > 0) {
-            r.addProperty("box", true);
-            JsonArray inn = new JsonArray();
-            for (ItemView.InnerItem ii : iv.inner) {
-                JsonObject io = new JsonObject();
-                io.addProperty("id", ii.id());
-                io.addProperty("count", ii.count());
-                if (ii.customText() != null && !ii.customText().isEmpty()) {
-                    io.addProperty("custom", ii.customText());
-                }
-                inn.add(io);
-            }
-            r.add("inner", inn);
-        }
-        return r;
     }
 
     // ================= 聊天组装 =================

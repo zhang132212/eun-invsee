@@ -11,6 +11,7 @@ base {
 }
 
 repositories {
+	mavenCentral()
 	maven {
 		url = "https://pkgs.dev.azure.com/djtheredstoner/DevAuth/_packaging/public/maven/v1"
 	}
@@ -25,6 +26,11 @@ dependencies {
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 	compileOnly 'org.jetbrains:annotations:24.0.1'
+	testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+	testImplementation platform('org.junit:junit-bom:5.13.4')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testImplementation 'org.mockito:mockito-core:5.23.0'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 loom {
@@ -67,4 +73,21 @@ jar {
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}" }
 	}
+}
+
+sourceSets.test {
+	compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
+	runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
+}
+
+test {
+	useJUnitPlatform()
+	maxHeapSize = '2g'
+	systemProperty 'fabric.side', 'client'
+	systemProperty 'java.awt.headless', 'true'
+	systemProperty 'invsee.assetsJar', new File(gradle.gradleUserHomeDir, "caches/fabric-loom/${project.minecraft_version}/minecraft-client.jar").absolutePath
+	systemProperty 'junit.jupiter.execution.timeout.default', '30 s'
+	workingDir layout.buildDirectory.dir('test-run').get().asFile
+	doFirst { workingDir.mkdirs() }
+	testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
 }

@@ -1,508 +1,594 @@
 package com.eun.invsee.client.gui;
 
 import com.eun.invsee.client.net.ClientInvseeNet;
-import com.google.gson.JsonElement;
+import com.eun.invsee.data.InventorySnapshot;
 import com.google.gson.JsonObject;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
-import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
-import net.minecraft.core.Registry;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import org.lwjgl.glfw.GLFW;
 
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 
-/**
- * 背包式查看界面：按“玩家背包/容器”的样式，以 9 列物品格子展示图标+数量；
- * 悬停显示物品名（原版提示风格），点开带箱物品进入盒内容器预览（仿 MiniHUD/开箱）。
- * 只读：仅展示服务端发来的数据。
- */
+import static com.eun.invsee.client.gui.InvseeTheme.*;
+
+/** Read-only inventory inspector. Item stacks are rendered directly; no container menu is attached. */
 public class InvseeScreen extends Screen {
+    private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final long TIMEOUT_NS = 10_000_000_000L;
+    private static String lastTarget = "";
 
-    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-
-    private static final int CELL = 18;
-    private static final int COLS = 9;
-    private static final int COLOR_TITLE = 0xFFFFAA00;
-    private static final int COLOR_TEXT = 0xFFFFFFFF;
-    private static final int COLOR_HEADER = 0xFFFFFF55;
-    private static final int COLOR_BACK = 0xFF55FFFF;
-    private static final int COLOR_SLOT_BORDER = 0xFF373737;
-    private static final int COLOR_SLOT_BG = 0xFF8B8B8B;
-    private static final int COLOR_SLOT_BG_INNER = 0xFFC6C6C6;
-    private static final int COLOR_HOVER = 0xFFFFFFFF;
-
+    private InvseeLayout layout;
     private EditBox nameField;
-    private int scrollRow = 0;
-    private String status = "输入玩家名后点「查询」。需要 OP(等级≥2) 且服务端装有本 mod。";
+    private ActionButton queryButton;
+    private ActionButton refreshButton;
+    private ActionButton closeButton;
+    private ActionButton backButton;
+    private ActionButton dismissButton;
+    private InventorySnapshot snapshot;
+    private List<Slot> slots = List.of();
+    private final Deque<Preview> previews = new ArrayDeque<>();
+    private final Map<ItemStack, List<Component>> tooltips = new IdentityHashMap<>();
+    private Component feedback;
+    private boolean error;
+    private boolean loading;
+    private long pendingId = -1;
+    private long requestedAt;
+    private int scroll;
+    private boolean draggingScroll;
 
-    private long frames = 0;
-    private int lastMetricSecond = -1;
-
-    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("eun_invsee.client");
-
-    private List<Group> groups = new ArrayList<>();
-    private boolean boxMode = false;
-    private String boxTitle = "";
-    private List<RowItem> boxItems = new ArrayList<>();
-    private List<Row> rows = new ArrayList<>();
+    private record Slot(int x, int y, ItemStack stack, Component label, boolean selected) {}
+    private static final class Preview {
+        final ItemStack parent;
+        final List<ItemStack> slots;
+        int scrollRow;
+        Preview(ItemStack stack) {
+            parent = stack;
+            slots = InventorySnapshot.containerSlots(stack);
+        }
+    }
 
     public InvseeScreen() {
-        super(Component.literal("EUN 背包查看"));
+        super(t("title"));
+    }
+
+    private static Component t(String key, Object... args) {
+        return Component.translatable("screen.eun_invsee." + key, args);
     }
 
     @Override
     protected void init() {
-        super.init();
-        int fieldW = Math.min(280, this.width / 2 - 70);
-        nameField = new EditBox(this.font, 8, 6, fieldW, 16, Component.literal("玩家名"));
-        nameField.setHint(Component.literal("玩家名（在线或最近上线过）"));
+        String typed = nameField == null ? lastTarget : nameField.getValue();
+        layout = InvseeLayout.create(width, height);
+        var p = layout.panel();
+        nameField = new EditBox(font, p.x() + 20, p.y() + 42, p.width() - 152, 14, t("player_name"));
+        nameField.setBordered(false);
+        nameField.setTextColor(TEXT);
+        nameField.setTextShadow(false);
         nameField.setMaxLength(32);
-        this.addRenderableWidget(nameField);
-
-        Button btnQuery = Button.builder(Component.literal("查询"), b -> doQuery())
-                .bounds(8 + fieldW + 4, 4, 56, 20)
-                .build();
-        this.addRenderableWidget(btnQuery);
-
+        nameField.setHint(t("search_hint"));
+        nameField.setValue(typed);
+        addRenderableWidget(nameField);
+        queryButton = addRenderableWidget(new ActionButton(font, p.right() - 124, p.y() + 36, 58, 24,
+                t("query"), true, b -> doQuery(nameField.getValue())));
+        refreshButton = addRenderableWidget(new ActionButton(font, p.right() - 60, p.y() + 36, 48, 24,
+                t("refresh"), false, b -> {
+                    if (snapshot != null) doQuery(snapshot.target());
+                }));
+        closeButton = addRenderableWidget(new ActionButton(font, p.right() - 32, p.y() + 8, 20, 20,
+                Component.literal("×"), false, b -> onClose()));
+        backButton = addWidget(new ActionButton(font, 0, 0, 22, 20, Component.literal("‹"), false, b -> popPreview()));
+        dismissButton = addWidget(new ActionButton(font, 0, 0, 22, 20, Component.literal("×"), false, b -> {
+            previews.clear();
+            tooltips.clear();
+            syncButtons();
+        }));
+        rebuildSlots();
+        scroll = layout.clampScroll(scroll);
         ClientInvseeNet.setScreen(this);
-        rebuildRows();
+        syncButtons();
+        if (snapshot == null && previews.isEmpty()) setInitialFocus(nameField);
     }
 
-    private void doQuery() {
-        String target = nameField.getValue().trim();
+    private void doQuery(String input) {
+        if (loading || !previews.isEmpty()) return;
+        String target = input.trim();
         if (target.isEmpty()) {
-            status = "请输入玩家名。";
+            queryFailed(t("enter_name"));
+            setFocused(nameField);
             return;
         }
-        status = "正在查询 " + target + " …";
-        ClientInvseeNet.request(target);
+        if (!ClientInvseeNet.available()) {
+            queryFailed(t("unavailable"));
+            return;
+        }
+        lastTarget = target;
+        nameField.setValue(target);
+        pendingId = ClientInvseeNet.nextRequestId();
+        requestedAt = System.nanoTime();
+        loading = true;
+        error = false;
+        feedback = t("loading", target);
+        syncButtons();
+        try {
+            ClientInvseeNet.request(target, pendingId);
+        } catch (RuntimeException e) {
+            queryFailed(t("unavailable"));
+        }
     }
 
-    /** 服务端响应到达（客户端主线程）。 */
     public void applyResponse(JsonObject root) {
-        boxMode = false;
-        scrollRow = 0;
-        releaseState();
-        int groupCount = 0;
-        int rowCount = 0;
-        if (root.has("groups")) {
-            groupCount = root.getAsJsonArray("groups").size();
+        if (!loading) return;
+        if (!root.has("protocol") || root.get("protocol").getAsInt() != InventorySnapshot.PROTOCOL) {
+            queryFailed(t("version_error"));
+            return;
         }
-        LOG.info("[eun_invsee] applyResponse ok={} target={} groups={} jsonLen={}",
-                root.has("ok") ? root.get("ok").getAsBoolean() : false,
-                root.has("target") ? root.get("target").getAsString() : "?",
-                groupCount,
-                root.toString().length());
+        if (!root.has("requestId") || root.get("requestId").getAsLong() != pendingId) return;
         if (!root.has("ok") || !root.get("ok").getAsBoolean()) {
-            String err = root.has("err") ? root.get("err").getAsString() : "未知错误";
-            status = "查询失败：" + err;
-            groups = new ArrayList<>();
-            rows = new ArrayList<>();
+            queryFailed(root.has("err") ? Component.literal(root.get("err").getAsString()) : t("decode_error"));
             return;
         }
-        String target = root.has("target") ? root.get("target").getAsString() : "";
-        boolean online = root.has("online") && root.get("online").getAsBoolean();
-        long savedAt = root.has("savedAt") ? root.get("savedAt").getAsLong() : -1;
-
-        StringBuilder sb = new StringBuilder(target).append("   ·   ");
-        if (online) {
-            sb.append("在线（实时）");
-        } else {
-            sb.append("离线 · 存档 ");
-            sb.append(savedAt > 0
-                    ? TIME_FMT.format(Instant.ofEpochMilli(savedAt).atZone(ZoneId.systemDefault()))
-                    : "未知");
-        }
-        status = sb.toString();
-
-        groups = new ArrayList<>();
-        if (root.has("groups")) {
-            for (JsonElement ge : root.getAsJsonArray("groups")) {
-                JsonObject go = ge.getAsJsonObject();
-                Group g = new Group();
-                g.title = go.has("title") ? go.get("title").getAsString() : "";
-                g.kind = go.has("kind") ? go.get("kind").getAsString() : "";
-                g.cap = go.has("cap") ? go.get("cap").getAsInt() : 0;
-                g.filled = go.has("filled") ? go.get("filled").getAsInt() : 0;
-                g.rows = new ArrayList<>();
-                if (go.has("rows")) {
-                    for (JsonElement re : go.getAsJsonArray("rows")) {
-                        g.rows.add(parseRow(re.getAsJsonObject()));
-                    }
-                }
-                groups.add(g);
-            }
-        }
-        rebuildRows();
-    }
-
-    private RowItem parseRow(JsonObject o) {
-        RowItem it = new RowItem();
-        it.label = o.has("label") ? o.get("label").getAsString() : "";
-        it.code = o.has("code") ? o.get("code").getAsString() : "";
-        it.id = o.has("id") ? o.get("id").getAsString() : "";
-        it.count = o.has("count") ? o.get("count").getAsInt() : 1;
-        it.custom = o.has("custom") ? o.get("custom").getAsString() : null;
-        it.sel = o.has("sel") && o.get("sel").getAsBoolean();
-        it.box = o.has("box") && o.get("box").getAsBoolean();
-        it.enchKeys = new ArrayList<>();
-        if (o.has("ench")) {
-            for (JsonElement e : o.getAsJsonArray("ench")) {
-                JsonObject eo = e.getAsJsonObject();
-                it.enchKeys.add(eo.has("k") ? eo.get("k").getAsString() : "");
-            }
-        }
-        it.inner = new ArrayList<>();
-        if (o.has("inner")) {
-            for (JsonElement e : o.getAsJsonArray("inner")) {
-                JsonObject io = e.getAsJsonObject();
-                RowItem ii = new RowItem();
-                ii.id = io.has("id") ? io.get("id").getAsString() : "";
-                ii.count = io.has("count") ? io.get("count").getAsInt() : 1;
-                ii.custom = io.has("custom") ? io.get("custom").getAsString() : null;
-                it.inner.add(ii);
-            }
-        }
-        return it;
-    }
-
-    // ---------- 行模型（9 列格子） ----------
-
-    private static final class Row {
-        boolean header;
-        String text;
-        RowItem[] slots; // 长度 9，可为 null 表示空格
-        boolean backRow;
-    }
-
-    private void rebuildRows() {
-        rows = new ArrayList<>();
-        if (boxMode) {
-            addHeader(boxTitle, true);
-            addSlotsGrid(boxItems, false);
+        if (minecraft.level == null) {
+            disconnected();
             return;
         }
-        for (Group g : groups) {
-            boolean ender = "ender".equals(g.kind);
-            boolean important = "armor".equals(g.kind) || "offhand".equals(g.kind);
-            if (g.rows.isEmpty() && !ender) {
-                continue;
-            }
-            StringBuilder t = new StringBuilder(g.title);
-            if (g.cap > 0) {
-                t.append(" (").append(g.filled).append('/').append(g.cap).append(')');
-            }
-            addHeader(t.toString(), false);
-            if (g.rows.isEmpty()) {
-                addSlotsGrid(new ArrayList<>(), true);
-            } else {
-                addSlotsGrid(g.rows, !important && !ender);
-            }
-        }
-        clampScroll();
+        InventorySnapshot next = InventorySnapshot.fromJson(root, minecraft.level.registryAccess());
+        boolean sameTarget = snapshot != null && snapshot.target().equalsIgnoreCase(next.target());
+        snapshot = next;
+        pendingId = -1;
+        loading = false;
+        feedback = null;
+        error = false;
+        previews.clear();
+        tooltips.clear();
+        if (!sameTarget) scroll = 0;
+        rebuildSlots();
+        syncButtons();
     }
 
-    private void addHeader(String text, boolean backRow) {
-        Row r = new Row();
-        r.header = true;
-        r.text = text;
-        r.backRow = backRow;
-        rows.add(r);
+    public void queryFailed(Component message) {
+        loading = false;
+        pendingId = -1;
+        feedback = message;
+        error = true;
+        syncButtons();
     }
 
-    /** pad=true 时把空格补满整行（背包/末影箱的样式），false 只画已占格子。 */
-    private void addSlotsGrid(List<RowItem> items, boolean padToRow) {
-        int pos = 0;
-        while (pos < items.size() || (padToRow && pos % COLS != 0)) {
-            Row r = new Row();
-            r.slots = new RowItem[COLS];
-            for (int c = 0; c < COLS; c++) {
-                if (pos < items.size()) {
-                    r.slots[c] = items.get(pos);
-                    pos++;
-                } else if (padToRow) {
-                    r.slots[c] = null; // 空格
-                } else {
-                    break;
-                }
-            }
-            rows.add(r);
-            if (!padToRow && pos >= items.size()) {
-                break;
-            }
-        }
-        if (items.isEmpty() && !padToRow) {
-            // 不会发生：调用方在空时会用 padToRow=true
-        }
+    public void disconnected() {
+        snapshot = null;
+        slots = List.of();
+        previews.clear();
+        tooltips.clear();
+        queryFailed(t("disconnected"));
     }
-
-    // ---------- 区域 ----------
-
-    private int gridLeft() {
-        return (this.width - COLS * CELL) / 2;
-    }
-
-    private int gridTop() {
-        return 34;
-    }
-
-    private int gridBottom() {
-        return this.height - 46;
-    }
-
-    private int visibleRows() {
-        return Math.max(1, (gridBottom() - gridTop()) / CELL);
-    }
-
-    private void clampScroll() {
-        int max = Math.max(0, rows.size() - visibleRows());
-        scrollRow = Math.max(0, Math.min(scrollRow, max));
-    }
-
-    // ---------- 输入 ----------
 
     @Override
-    public boolean keyPressed(KeyEvent keyEvent) {
-        if (keyEvent.key() == GLFW.GLFW_KEY_ENTER || keyEvent.key() == GLFW.GLFW_KEY_KP_ENTER) {
-            if (nameField != null && nameField.isFocused()) {
-                doQuery();
+    public void tick() {
+        super.tick();
+        if (loading && System.nanoTime() - requestedAt >= TIMEOUT_NS) queryFailed(t("timeout"));
+    }
+
+    private void syncButtons() {
+        if (queryButton == null) return;
+        boolean modal = !previews.isEmpty();
+        queryButton.active = !modal && !loading;
+        queryButton.setMessage(t(loading ? "querying" : "query"));
+        refreshButton.active = !modal && !loading && snapshot != null;
+        closeButton.active = !modal;
+        nameField.active = !modal;
+        nameField.setEditable(!modal);
+        backButton.visible = modal;
+        backButton.active = modal;
+        dismissButton.visible = modal;
+        dismissButton.active = modal;
+    }
+
+    private void rebuildSlots() {
+        if (snapshot == null || layout == null) {
+            slots = List.of();
+            return;
+        }
+        List<Slot> out = new ArrayList<>(69);
+        var inv = layout.inventory();
+        for (int i = 9; i < 36; i++) {
+            out.add(new Slot(layout.gridX(inv) + (i - 9) % 9 * InvseeLayout.CELL,
+                    inv.y() + 30 + (i - 9) / 9 * InvseeLayout.CELL,
+                    snapshot.inventory().get(i), t("inventory_slot", i - 8), false));
+        }
+        for (int i = 0; i < 9; i++) {
+            out.add(new Slot(layout.gridX(inv) + i * InvseeLayout.CELL, inv.y() + 120,
+                    snapshot.inventory().get(i), t("hotbar_slot", i + 1), i == snapshot.selected()));
+        }
+        var eq = layout.equipment();
+        int equipmentX = eq.x() + (eq.width() - 182) / 2;
+        for (int i = 0; i < 6; i++) {
+            out.add(new Slot(equipmentX + i * 32, eq.y() + 28, snapshot.equipment().get(i),
+                    t(InventorySnapshot.EQUIPMENT_KEYS.get(i)), false));
+        }
+        var ender = layout.ender();
+        for (int i = 0; i < 27; i++) {
+            out.add(new Slot(layout.gridX(ender) + i % 9 * InvseeLayout.CELL,
+                    ender.y() + 30 + i / 9 * InvseeLayout.CELL,
+                    snapshot.ender().get(i), t("ender_slot", i + 1), false));
+        }
+        slots = List.copyOf(out);
+    }
+
+    private void openPreview(ItemStack stack) {
+        if (!InventorySnapshot.isContainer(stack)) return;
+        previews.push(new Preview(stack));
+        tooltips.clear();
+        draggingScroll = false;
+        clearFocus();
+        syncButtons();
+        placePreviewButtons();
+        setFocused(backButton);
+    }
+
+    private void popPreview() {
+        if (!previews.isEmpty()) previews.pop();
+        tooltips.clear();
+        syncButtons();
+        if (previews.isEmpty()) setFocused(queryButton);
+    }
+
+    @Override
+    public boolean keyPressed(KeyEvent event) {
+        if (!previews.isEmpty()) {
+            if (event.key() == GLFW.GLFW_KEY_ESCAPE || event.key() == GLFW.GLFW_KEY_BACKSPACE) {
+                popPreview();
+                return true;
+            }
+            return super.keyPressed(event);
+        }
+        if (event.key() == GLFW.GLFW_KEY_ENTER || event.key() == GLFW.GLFW_KEY_KP_ENTER) {
+            if (nameField.isFocused()) {
+                doQuery(nameField.getValue());
                 return true;
             }
         }
-        if (keyEvent.key() == GLFW.GLFW_KEY_ESCAPE) {
-            this.onClose();
+        if (event.key() == GLFW.GLFW_KEY_F5 && snapshot != null) {
+            doQuery(snapshot.target());
             return true;
         }
-        return super.keyPressed(keyEvent);
+        return super.keyPressed(event);
     }
 
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-        if (mouseY >= gridTop() && mouseY <= gridBottom()) {
-            int max = Math.max(0, rows.size() - visibleRows());
-            if (scrollY > 0) {
-                scrollRow = Math.max(0, scrollRow - 2);
-            } else if (scrollY < 0) {
-                scrollRow = Math.min(max, scrollRow + 2);
+    public boolean mouseClicked(MouseButtonEvent event, boolean focused) {
+        if (!previews.isEmpty()) {
+            placePreviewButtons();
+            if (backButton.mouseClicked(event, focused) || dismissButton.mouseClicked(event, focused)) return true;
+            var rect = previewRect();
+            if (!rect.contains(event.x(), event.y())) {
+                popPreview();
+                return true;
             }
+            ItemStack stack = hoveredPreviewStack(event.x(), event.y());
+            if (event.button() == GLFW.GLFW_MOUSE_BUTTON_RIGHT && !stack.isEmpty()) openPreview(stack);
             return true;
         }
-        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
-    }
-
-    @Override
-    public boolean mouseClicked(MouseButtonEvent mouseEvent, boolean focused) {
-        if (super.mouseClicked(mouseEvent, focused)) {
+        if (super.mouseClicked(event, focused)) return true;
+        if (snapshot == null || loading) return false;
+        if (event.button() == GLFW.GLFW_MOUSE_BUTTON_LEFT && scrollbarTrack().contains(event.x(), event.y())
+                && layout.maxScroll() > 0) {
+            draggingScroll = true;
+            moveScrollbar(event.y());
             return true;
         }
-        if (mouseEvent.button() == 0) {
-            int x = (int) mouseEvent.x();
-            int y = (int) mouseEvent.y();
-            if (y >= gridTop() && y <= gridBottom()) {
-                int rowIdx = scrollRow + (y - gridTop()) / CELL;
-                if (rowIdx >= 0 && rowIdx < rows.size()) {
-                    Row row = rows.get(rowIdx);
-                    if (row.header) {
-                        if (row.backRow && boxMode) {
-                            backToOverview();
-                            return true;
-                        }
-                        return false;
-                    }
-                    int col = (x - gridLeft()) / CELL;
-                    if (col >= 0 && col < COLS && row.slots != null && col < row.slots.length) {
-                        RowItem it = row.slots[col];
-                        if (it != null && it.box) {
-                            openBox(it);
-                            return true;
-                        }
-                    }
-                }
-            }
+        Slot slot = hoveredSlot(event.x(), event.y());
+        if (slot != null && event.button() == GLFW.GLFW_MOUSE_BUTTON_RIGHT) {
+            openPreview(slot.stack);
+            return true;
         }
         return false;
     }
 
-    private void openBox(RowItem parent) {
-        if (!parent.box || parent.inner.isEmpty()) {
-            return;
+    @Override
+    public boolean mouseDragged(MouseButtonEvent event, double dx, double dy) {
+        if (draggingScroll) {
+            moveScrollbar(event.y());
+            return true;
         }
-        boxMode = true;
-        String name = parent.custom != null && !parent.custom.isEmpty()
-                ? parent.custom : (parent.id + " ×" + parent.count);
-        boxTitle = "◀ 返回总览   容器 · " + name + "（" + parent.inner.size() + " 格）";
-        boxItems = parent.inner;
-        scrollRow = 0;
-        rebuildRows();
+        return super.mouseDragged(event, dx, dy);
     }
 
-    private void backToOverview() {
-        boxMode = false;
-        scrollRow = 0;
-        rebuildRows();
+    @Override
+    public boolean mouseReleased(MouseButtonEvent event) {
+        draggingScroll = false;
+        return super.mouseReleased(event);
     }
 
-    // ---------- 渲染 ----------
+    @Override
+    public boolean mouseScrolled(double x, double y, double horizontal, double vertical) {
+        if (!previews.isEmpty()) {
+            Preview preview = previews.peek();
+            int max = Math.max(0, preview.slots.size() / 9 - previewRows());
+            preview.scrollRow = Math.max(0, Math.min(max, preview.scrollRow - (int) Math.signum(vertical)));
+            return true;
+        }
+        if (layout.viewport().contains(x, y)) {
+            scroll = layout.clampScroll(scroll - (int) (vertical * 22));
+            return true;
+        }
+        return super.mouseScrolled(x, y, horizontal, vertical);
+    }
+
+    private Slot hoveredSlot(double x, double y) {
+        var v = layout.viewport();
+        if (!v.contains(x, y)) return null;
+        double localX = x - v.x();
+        double localY = y - v.y() + scroll;
+        for (Slot slot : slots) {
+            if (localX >= slot.x && localX < slot.x + InvseeLayout.CELL
+                    && localY >= slot.y && localY < slot.y + InvseeLayout.CELL) return slot;
+        }
+        return null;
+    }
+
+    private InvseeLayout.Rect scrollbarTrack() {
+        var v = layout.viewport();
+        return new InvseeLayout.Rect(v.right() - 4, v.y(), 4, v.height());
+    }
+
+    private int thumbHeight() {
+        var v = layout.viewport();
+        return Math.max(18, v.height() * v.height() / layout.contentHeight());
+    }
+
+    private void moveScrollbar(double y) {
+        var track = scrollbarTrack();
+        int travel = track.height() - thumbHeight();
+        if (travel > 0) scroll = layout.clampScroll((int) ((y - track.y() - thumbHeight() / 2.0)
+                / travel * layout.maxScroll()));
+    }
+
+    @Override
+    public void extractBackground(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+        // The in-game world remains visible underneath the custom panel.
+    }
 
     @Override
     public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+        if (layout == null) return;
+        var p = layout.panel();
+        g.fill(0, 0, width, height, 0xB8091016);
+        g.fill(p.x() + 3, p.y() + 5, p.right() + 3, p.bottom() + 5, 0x66000000);
+        surface(g, p.x(), p.y(), p.width(), p.height(), PANEL, BORDER);
+        g.fill(p.x() + 12, p.y() + 12, p.x() + 15, p.y() + 23, ACCENT);
+        g.text(font, title, p.x() + 23, p.y() + 14, TEXT, false);
+        Component readOnly = t("read_only");
+        g.text(font, readOnly, p.right() - 45 - font.width(readOnly), p.y() + 14, ACCENT, false);
+        surface(g, p.x() + 12, p.y() + 36, p.width() - 142, 24, SLOT, nameField.isFocused() ? ACCENT : BORDER);
+        renderIdentity(g);
+        var v = layout.viewport();
+        g.enableScissor(v.x(), v.y(), v.right(), v.bottom());
+        if (snapshot == null) renderEmpty(g);
+        else renderInventory(g, mouseX, mouseY);
+        g.disableScissor();
+        if (snapshot != null && layout.maxScroll() > 0) renderScrollbar(g);
+        Component footer = feedback == null ? t(snapshot != null && layout.maxScroll() > 0 ? "hint_scroll" : "hint") : feedback;
+        textFit(g, footer, p.x() + 12, p.bottom() - 16, p.width() - 24, error ? ERROR : MUTED);
         super.extractRenderState(g, mouseX, mouseY, partialTick);
-        if (nameField == null) {
-            return;
-        }
-
-        g.text(this.font, Component.literal("EUN 背包查看（只读）"), 8, 28, COLOR_TITLE);
-        g.text(this.font, Component.literal(status), 8, this.height - 38, COLOR_HEADER);
-
-        clampScroll();
-        int top = gridTop();
-        int left = gridLeft();
-        int vis = visibleRows();
-        RowItem hoverItem = null;
-
-        frames++;
-        int sec = (int) (System.currentTimeMillis() / 1000);
-        if (sec != lastMetricSecond) {
-            lastMetricSecond = sec;
-            if (frames % 100 == 0 || frames <= 5) {
-                Runtime rt = Runtime.getRuntime();
-                long used = rt.totalMemory() - rt.freeMemory();
-                LOG.info("[eun_invsee] memMB={} rows={} frame={}", used / 1048576L, rows.size(), frames);
+        if (previews.isEmpty()) {
+            if (mouseY >= p.bottom() - 21 && mouseY < p.bottom() && feedback != null) {
+                g.setTooltipForNextFrame(font, feedback, mouseX, mouseY);
+            } else if (!loading) {
+                Slot hovered = hoveredSlot(mouseX, mouseY);
+                if (hovered != null) showTooltip(g, hovered.stack, hovered.label, mouseX, mouseY);
             }
-        }
-
-        for (int i = scrollRow; i < rows.size() && i < scrollRow + vis; i++) {
-            int y = top + (i - scrollRow) * CELL;
-            Row row = rows.get(i);
-            if (row.header) {
-                g.text(this.font, Component.literal(row.text), left, y + 4,
-                        row.backRow ? COLOR_BACK : COLOR_HEADER);
-                continue;
-            }
-            for (int c = 0; c < COLS && row.slots != null && c < row.slots.length; c++) {
-                int x = left + c * CELL;
-                RowItem it = row.slots[c];
-                boolean hovered = mouseX >= x && mouseX < x + CELL && mouseY >= y && mouseY < y + CELL;
-                drawSlot(g, x, y, it, hovered);
-                if (hovered && it != null) {
-                    hoverItem = it;
-                }
-            }
-        }
-
-        // 自绘悬停信息（不依赖每帧注册的原版提示，避免累积）
-        if (hoverItem != null) {
-            String info = hoverItem.label.isEmpty() ? "" : "[" + hoverItem.label + "] ";
-            String name = hoverItem.custom != null && !hoverItem.custom.isEmpty()
-                    ? hoverItem.custom : hoverItem.id;
-            g.text(this.font, Component.literal(info + name + "  ×" + hoverItem.count
-                    + (hoverItem.box ? "  （含" + hoverItem.inner.size() + " 格，点击查看）" : "")
-                    + "  ID:" + hoverItem.id), 8, this.height - 16, COLOR_HEADER);
-            // 在格子旁显示名字缩略（不跨过屏幕右缘）
-            String snip = info + name + " ×" + hoverItem.count;
-            if (this.font.width(snip) > this.width - mouseX - 12) {
-                snip = this.font.plainSubstrByWidth(snip, this.width - mouseX - 12);
-            }
-            int ty = mouseY >= this.height - 40 ? mouseY - 10 : mouseY + 12;
-            g.text(this.font, Component.literal(snip), mouseX + 6, ty, COLOR_TEXT);
+        } else {
+            renderPreview(g, mouseX, mouseY, partialTick);
         }
     }
 
-    private void drawSlot(GuiGraphicsExtractor g, int x, int y, RowItem it, boolean hovered) {
-        int border = hovered ? COLOR_HOVER : COLOR_SLOT_BORDER;
-        g.fill(x, y, x + CELL, y + CELL, border);
-        g.fill(x + 1, y + 1, x + CELL - 1, y + CELL - 1, COLOR_SLOT_BG);
-        if (it == null) {
+    private void renderIdentity(GuiGraphicsExtractor g) {
+        var p = layout.panel();
+        if (snapshot == null) {
+            g.text(font, t("welcome"), p.x() + 14, p.y() + 70, TEXT, false);
+            textFit(g, t("welcome_detail"), p.x() + 14, p.y() + 83, p.width() - 28, MUTED);
             return;
         }
-        ItemStack st = stackOf(it);
-        if (st.isEmpty()) {
-            g.text(this.font, Component.literal("?"), x + 4, y + 3, 0xFF333333);
-            return;
+        surface(g, p.x() + 12, p.y() + 66, 24, 24, 0xFF233B3B, BORDER);
+        String initial = snapshot.target().isEmpty() ? "?" : snapshot.target().substring(0, 1).toUpperCase(java.util.Locale.ROOT);
+        g.text(font, initial, p.x() + 24 - font.width(initial) / 2, p.y() + 74, ACCENT, false);
+        textFit(g, Component.literal(snapshot.target()), p.x() + 44, p.y() + 68, p.width() - 130, TEXT);
+        Component state = t(snapshot.online() ? "online" : "offline");
+        int stateWidth = font.width(state) + 14;
+        int stateX = p.right() - 12 - stateWidth;
+        surface(g, stateX, p.y() + 65, stateWidth, 16, CARD, BORDER);
+        g.fill(stateX + 5, p.y() + 71, stateX + 8, p.y() + 74, snapshot.online() ? ACCENT : PURPLE);
+        g.text(font, state, stateX + 11, p.y() + 69, snapshot.online() ? ACCENT : PURPLE, false);
+        long time = snapshot.online() ? snapshot.capturedAt() : snapshot.savedAt();
+        String date = time > 0 ? TIME.format(Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault())) : t("unknown_time").getString();
+        textFit(g, t(snapshot.online() ? "captured_at" : "saved_at", date),
+                p.x() + 44, p.y() + 82, p.width() - 56, MUTED);
+    }
+
+    private void renderEmpty(GuiGraphicsExtractor g) {
+        var v = layout.viewport();
+        int cx = v.x() + v.width() / 2;
+        int cy = v.y() + Math.max(22, v.height() / 2 - 22);
+        surface(g, cx - 18, cy - 10, 36, 27, CARD, BORDER);
+        g.fill(cx - 16, cy - 1, cx + 16, cy + 1, BORDER);
+        g.fill(cx - 2, cy - 2, cx + 2, cy + 4, ACCENT);
+        centeredFit(g, t(loading ? "querying" : "empty_title"), cx, cy + 28, v.width() - 20, TEXT);
+        centeredFit(g, t("empty_detail"), cx, cy + 43, v.width() - 20, MUTED);
+    }
+
+    private void renderInventory(GuiGraphicsExtractor g, int mouseX, int mouseY) {
+        renderCard(g, layout.inventory(), t("inventory"), InventorySnapshot.occupied(snapshot.inventory()), 36, ACCENT);
+        renderCard(g, layout.equipment(), t("equipment"), InventorySnapshot.occupied(snapshot.equipment()), 6, ACCENT);
+        renderCard(g, layout.ender(), t("ender"), InventorySnapshot.occupied(snapshot.ender()), 27, PURPLE);
+        var v = layout.viewport();
+        var inv = layout.inventory();
+        g.text(font, t("hotbar"), v.x() + layout.gridX(inv), v.y() + inv.y() + 106 - scroll, MUTED, false);
+        Slot hovered = previews.isEmpty() && !loading ? hoveredSlot(mouseX, mouseY) : null;
+        for (Slot slot : slots) {
+            int x = v.x() + slot.x;
+            int y = v.y() + slot.y - scroll;
+            if (y + InvseeLayout.CELL <= v.y() || y >= v.bottom()) continue;
+            drawSlot(g, x, y, slot.stack, slot == hovered, slot.selected);
         }
-        g.item(st, x + 1, y + 1);
-        g.itemDecorations(this.font, st, x + 1, y + 1);
-        if (it.box) {
-            g.text(this.font, Component.literal("箱"), x + 1, y + 1, 0xFFFFFF00);
+        var eq = layout.equipment();
+        int ex = v.x() + eq.x() + (eq.width() - 182) / 2;
+        for (int i = 0; i < 6; i++) {
+            Component label = t(InventorySnapshot.EQUIPMENT_KEYS.get(i));
+            centeredFit(g, label, ex + i * 32 + 11, v.y() + eq.y() + 55 - scroll, 31, MUTED);
         }
     }
 
-    // ---------- 物品构造 ----------
+    private void renderCard(GuiGraphicsExtractor g, InvseeLayout.Rect card, Component label, int filled, int cap, int accent) {
+        var v = layout.viewport();
+        int x = v.x() + card.x(), y = v.y() + card.y() - scroll;
+        surface(g, x, y, card.width(), card.height(), CARD, BORDER);
+        g.fill(x + 10, y + 11, x + 12, y + 19, accent);
+        g.text(font, label, x + 18, y + 11, TEXT, false);
+        String count = filled + " / " + cap;
+        g.text(font, count, x + card.width() - 11 - font.width(count), y + 11, MUTED, false);
+    }
 
-    private ItemStack stackOf(RowItem it) {
-        if (it.stackBuilt) {
-            return it.stack;
-        }
-        it.stackBuilt = true;
-        try {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.level != null) {
-                Registry<Item> reg = mc.level.registryAccess().lookupOrThrow(Registries.ITEM);
-                Identifier id = Identifier.tryParse(it.id);
-                Item item = id == null ? null : reg.getValue(id);
-                if (item != null) {
-                    ItemStack st = new ItemStack(item);
-                    st.setCount(Math.max(1, it.count));
-                    it.stack = st;
-                    return st;
-                }
+    private void drawSlot(GuiGraphicsExtractor g, int x, int y, ItemStack stack, boolean hover, boolean selected) {
+        int size = InvseeLayout.CELL - 1;
+        surface(g, x, y, size, size, hover ? 0xFF2F454B : SLOT,
+                hover ? ACCENT : selected ? 0xFFE4C783 : BORDER);
+        if (!stack.isEmpty()) {
+            g.item(stack, x + 2, y + 2);
+            g.itemDecorations(font, stack, x + 2, y + 2);
+            if (InventorySnapshot.isContainer(stack)) {
+                g.fill(x + size - 4, y + 1, x + size - 1, y + 4, PURPLE);
             }
-        } catch (Exception ignored) {
-            // 无法解析的物品 → 显示问号
+        } else {
+            g.fill(x + 9, y + 9, x + 11, y + 11, 0xFF293B43);
         }
-        it.stack = ItemStack.EMPTY;
-        return it.stack;
+    }
+
+    private void renderScrollbar(GuiGraphicsExtractor g) {
+        var track = scrollbarTrack();
+        int thumb = thumbHeight();
+        int y = track.y() + scroll * (track.height() - thumb) / layout.maxScroll();
+        g.fill(track.x(), track.y(), track.right(), track.bottom(), SLOT);
+        g.fill(track.x(), y, track.right(), y + thumb, draggingScroll ? ACCENT : BORDER);
+    }
+
+    private int previewRows() {
+        if (previews.isEmpty()) return 3;
+        return Math.max(1, Math.min(previews.peek().slots.size() / 9, Math.min(6, (height - 100) / InvseeLayout.CELL)));
+    }
+
+    private InvseeLayout.Rect previewRect() {
+        int w = Math.min(246, width - 20);
+        int h = 76 + previewRows() * InvseeLayout.CELL;
+        return new InvseeLayout.Rect((width - w) / 2, (height - h) / 2, w, h);
+    }
+
+    private void placePreviewButtons() {
+        if (!previews.isEmpty()) {
+            Preview current = previews.peek();
+            current.scrollRow = Math.min(current.scrollRow, Math.max(0, current.slots.size() / 9 - previewRows()));
+        }
+        var r = previewRect();
+        backButton.setX(r.x() + 10);
+        backButton.setY(r.y() + 8);
+        dismissButton.setX(r.right() - 32);
+        dismissButton.setY(r.y() + 8);
+    }
+
+    private ItemStack hoveredPreviewStack(double x, double y) {
+        if (previews.isEmpty()) return ItemStack.EMPTY;
+        var r = previewRect();
+        int left = r.x() + (r.width() - InvseeLayout.GRID_WIDTH) / 2;
+        int top = r.y() + 50;
+        var grid = new InvseeLayout.Rect(left, top, InvseeLayout.GRID_WIDTH, previewRows() * InvseeLayout.CELL);
+        if (!grid.contains(x, y)) return ItemStack.EMPTY;
+        int col = (int) (x - left) / InvseeLayout.CELL;
+        int row = (int) (y - top) / InvseeLayout.CELL + previews.peek().scrollRow;
+        return previews.peek().slots.get(row * 9 + col);
+    }
+
+    private void renderPreview(GuiGraphicsExtractor g, int mouseX, int mouseY, float partialTick) {
+        placePreviewButtons();
+        Preview preview = previews.peek();
+        var r = previewRect();
+        g.nextStratum();
+        g.fill(0, 0, width, height, 0xC0081015);
+        surface(g, r.x(), r.y(), r.width(), r.height(), PANEL, 0xFF78658E);
+        centeredFit(g, t("container_title"), r.x() + r.width() / 2, r.y() + 14, r.width() - 76, PURPLE);
+        centeredFit(g, preview.parent.getHoverName(), r.x() + r.width() / 2, r.y() + 35, r.width() - 24, TEXT);
+        int left = r.x() + (r.width() - InvseeLayout.GRID_WIDTH) / 2;
+        ItemStack hovered = hoveredPreviewStack(mouseX, mouseY);
+        int first = preview.scrollRow * 9;
+        int shown = previewRows() * 9;
+        for (int i = 0; i < shown; i++) {
+            ItemStack stack = preview.slots.get(first + i);
+            drawSlot(g, left + i % 9 * InvseeLayout.CELL, r.y() + 50 + i / 9 * InvseeLayout.CELL,
+                    stack, !stack.isEmpty() && stack == hovered, false);
+        }
+        Component count = t("container_count", InventorySnapshot.occupied(preview.slots), preview.slots.size());
+        if (preview.slots.size() > shown) {
+            count = t("container_scroll", preview.scrollRow + 1, preview.slots.size() / 9);
+        }
+        centeredFit(g, count, r.x() + r.width() / 2, r.bottom() - 19, r.width() - 16, MUTED);
+        backButton.extractRenderState(g, mouseX, mouseY, partialTick);
+        dismissButton.extractRenderState(g, mouseX, mouseY, partialTick);
+        if (!hovered.isEmpty()) showTooltip(g, hovered, t("container_item"), mouseX, mouseY);
+    }
+
+    private void showTooltip(GuiGraphicsExtractor g, ItemStack stack, Component location, int mouseX, int mouseY) {
+        if (stack.isEmpty()) {
+            g.setTooltipForNextFrame(font, location.copy().append(t("empty_slot")), mouseX, mouseY);
+            return;
+        }
+        List<Component> lines = new ArrayList<>(tooltips.computeIfAbsent(stack, item -> List.copyOf(getTooltipFromItem(minecraft, item))));
+        lines.add(location.copy().withColor(0x97ADB5));
+        if (InventorySnapshot.isContainer(stack)) lines.add(t("open_container").copy().withColor(0xC4ACEC));
+        g.setTooltipForNextFrame(font, lines, stack.getTooltipImage(), mouseX, mouseY);
+    }
+
+    private void textFit(GuiGraphicsExtractor g, Component value, int x, int y, int maxWidth, int color) {
+        String text = value.getString();
+        if (font.width(text) > maxWidth) text = font.plainSubstrByWidth(text, Math.max(0, maxWidth - font.width("…"))) + "…";
+        g.text(font, text, x, y, color, false);
+    }
+
+    private void centeredFit(GuiGraphicsExtractor g, Component value, int center, int y, int maxWidth, int color) {
+        String text = value.getString();
+        if (font.width(text) > maxWidth) text = font.plainSubstrByWidth(text, Math.max(0, maxWidth - font.width("…"))) + "…";
+        g.text(font, text, center - font.width(text) / 2, y, color, false);
+    }
+
+    @Override
+    public boolean isPauseScreen() { return false; }
+
+    @Override
+    public void removed() {
+        ClientInvseeNet.clearScreen(this);
+        loading = false;
+        pendingId = -1;
+        super.removed();
     }
 
     @Override
     public void onClose() {
-        ClientInvseeNet.setScreen(null);
-        releaseState();
+        ClientInvseeNet.clearScreen(this);
+        snapshot = null;
+        slots = List.of();
+        previews.clear();
+        tooltips.clear();
+        pendingId = -1;
+        loading = false;
         super.onClose();
-    }
-
-    /** 释放所有持有数据/物品引用，便于 GC（防反复开关/查询造成残留占用）。 */
-    private void releaseState() {
-        groups = new ArrayList<>();
-        boxItems = new ArrayList<>();
-        rows = new ArrayList<>();
-        scrollRow = 0;
-    }
-
-    // ---------- 数据模型 ----------
-
-    private static final class Group {
-        String title;
-        String kind;
-        int cap;
-        int filled;
-        List<RowItem> rows;
-    }
-
-    private static final class RowItem {
-        String label = "";
-        String code = "";
-        String id = "";
-        String custom;
-        int count = 1;
-        boolean sel;
-        boolean box;
-        List<String> enchKeys = new ArrayList<>();
-        List<RowItem> inner = new ArrayList<>();
-        boolean stackBuilt;
-        ItemStack stack;
     }
 }

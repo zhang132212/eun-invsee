@@ -3,7 +3,7 @@
   "id": "eun_invsee",
   "version": "${version}",
   "name": "EUN Invsee",
-  "description": "背包查看(双端)：服务端 OP 用 /invsee 查看在线/离线玩家背包；配套客户端界面(按 P 打开)可查玩家背包并点开潜影盒等容器。全程只读。",
+  "description": "只读物品查看：OP 可查看在线/离线玩家的背包、装备与末影箱。按 R 打开界面，右键预览潜影盒完整内容；也支持 /invsee 指令。",
   "authors": [
     "zhang132212"
   ],

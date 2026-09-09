@@ -1,27 +1,31 @@
 package com.eun.invsee.client.net;
 
 import com.eun.invsee.client.gui.InvseeScreen;
+import com.eun.invsee.data.InventorySnapshot;
 import com.eun.invsee.net.InvseePackets;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+import org.slf4j.LoggerFactory;
 
-/**
- * 客户端网络：请求目标玩家背包数据，接收服务端 JSON 并交给打开的界面。
- */
+import java.util.concurrent.atomic.AtomicLong;
+
 public final class ClientInvseeNet {
+    private static final AtomicLong SEQUENCE = new AtomicLong();
+    private static InvseeScreen currentScreen;
 
-    private static InvseeScreen currentScreen = null;
-
-    private ClientInvseeNet() {
-    }
+    private ClientInvseeNet() {}
 
     public static void init() {
         ClientPlayNetworking.registerGlobalReceiver(InvseePackets.ResponsePayload.TYPE,
                 (payload, context) -> context.client().execute(() -> apply(payload.json())));
-
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            if (currentScreen != null) {
+                currentScreen.disconnected();
+            }
             currentScreen = null;
         });
     }
@@ -30,21 +34,38 @@ public final class ClientInvseeNet {
         currentScreen = screen;
     }
 
-    /** 请求查看某玩家（OP≥2）。结果到达后自动填到打开的界面。 */
-    public static void request(String target) {
-        JsonObject o = new JsonObject();
-        o.addProperty("target", target);
-        ClientPlayNetworking.send(new InvseePackets.RequestPayload(o.toString()));
+    public static void clearScreen(InvseeScreen screen) {
+        if (currentScreen == screen) {
+            currentScreen = null;
+        }
+    }
+
+    public static long nextRequestId() {
+        return SEQUENCE.incrementAndGet();
+    }
+
+    public static boolean available() {
+        return Minecraft.getInstance().getConnection() != null
+                && ClientPlayNetworking.canSend(InvseePackets.RequestPayload.TYPE);
+    }
+
+    public static void request(String target, long requestId) {
+        JsonObject request = new JsonObject();
+        request.addProperty("protocol", InventorySnapshot.PROTOCOL);
+        request.addProperty("requestId", requestId);
+        request.addProperty("target", target);
+        ClientPlayNetworking.send(new InvseePackets.RequestPayload(request.toString()));
     }
 
     private static void apply(String json) {
+        if (currentScreen == null) {
+            return;
+        }
         try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            if (currentScreen != null) {
-                currentScreen.applyResponse(root);
-            }
-        } catch (Exception ignored) {
-            // 畸形响应直接忽略
+            currentScreen.applyResponse(JsonParser.parseString(json).getAsJsonObject());
+        } catch (Exception e) {
+            LoggerFactory.getLogger("eun_invsee.client").warn("Invalid inventory response", e);
+            currentScreen.queryFailed(Component.translatable("screen.eun_invsee.decode_error"));
         }
     }
 }

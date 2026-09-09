@@ -1,115 +1,97 @@
-# eun-invsee — EUN 背包查看（服务端只读）
+# EUN Invsee
 
-Fabric 26.2 服务端模组：OP 用一条指令查看**任意玩家**的背包，**在线/离线**都支持，
-覆盖 **快捷栏 / 背包 / 装备(盔甲+身体) / 副手 / 末影箱**。**只读**——任何路径都不会修改
-玩家数据，无法通过本模组移走/放入任何物品。
+适用于 Minecraft 26.2 的 Fabric 只读物品查看模组。OP 可以查询在线与离线玩家的背包、装备、副手、末影箱，并直接右键查看潜影盒的完整内容。
 
-## 为什么做这个
+## 1.1.0 界面
 
-- MiniHUD 的背包预览需要客户端、按住快捷键、靠近玩家，只适合"自己看附近"。
-- 服务端 OP 想快速核查（疑似刷物品/违规物品、查离线号的库存）需要一条能直接查
-  在线和离线存档的命令。eun-invsee 就是干这个的，相当于 Bukkit 版 `invsee` 的
-  服务端 Fabric 实现，且只读。
+- 默认 **R** 打开；按键可在游戏控制设置中修改。
+- 输入玩家名后按 Enter 或点「查询」。点「刷新」或按 **F5** 重新读取当前玩家。
+- 深色面板、柔和强调色；宽窗口并排展示背包与末影箱，小窗口纵向排列，滚轮或拖动滚动条浏览。
+- 按真实槽位显示全部空格：背包 27 格、快捷栏 9 格、装备与副手 6 格、末影箱 27 格。
+- 当前选中的快捷栏使用金色边框。物品保留名称、数量、附魔、耐久及其他原版组件，悬停使用原版物品提示。
+- **右键潜影盒**打开当前界面上的只读预览，保留盒内空槽和物品的完整组件；空潜影盒也可以查看。
+- 容器内若还有容器数据，可以继续右键查看；**Esc / Backspace / 返回按钮**逐层返回，弹窗的关闭按钮返回背包总览。
+- 支持有容器组件的其他物品；超过 27 格的容器可滚动查看。
+- 查询超时、权限不足、服务器未安装模组及版本不匹配都有明确提示。
 
-## 指令
+在线数据是**查询时的快照**，需要刷新后查看后续变化。离线数据是**该服务器最后保存的存档**，界面标注存档时间。
 
-```
+## 安装
+
+| 依赖 | 版本 |
+| --- | --- |
+| Minecraft | 26.2 |
+| Java | 25 或以上 |
+| Fabric Loader | 0.19.3 或以上 |
+| Fabric API | 0.156.0+26.2 或以上 |
+
+1. 将 `eun-invsee-1.1.0.jar` 安装到服务端的 `mods/`。
+2. 需要图形界面的玩家在客户端安装**同一版本**的 jar。
+3. 重启服务端和客户端，进服后按 R，输入目标玩家名。
+4. 查询者需要 **OP 等级 ≥ 2**。单人世界需要开启作弊；集成服务器与独立服务器均注册查询通道。
+
+从 1.0.x 升级时，两端需要一起更新。图形界面的协议已经升级，旧版客户端仍可使用聊天指令。
+
+只在服务端安装时，玩家可使用下面的指令与原版箱子预览，无需配套客户端模组。
+
+## 聊天指令
+
+```text
 /invsee <玩家名> [页码]
+/invsee box <玩家名> <位置码>
 ```
 
-- 在线玩家 → 读取**实时**背包（不是存档快照）。
-- 离线玩家 → 从存档 `world/players/data/<uuid>.dat` 读取**最后保存**的内容，
-  头部显示存档时间。
-- 支持翻页：点击 `[上一页]/[下一页]`。
-- 悬停物品名可查看详情：物品 ID、耐久损伤、附魔、潜影盒等容器内含概要。
-- 快捷栏当前选中格会用金色 `◀` 标记。
+- Tab 补全包含在线玩家及 `usercache.json` 中的玩家名。
+- 聊天内容支持翻页、物品详情悬停和可点击的「开箱」。
+- 位置码：`h0..h8` 快捷栏、`m0..m26` 背包、`e0..e26` 末影箱，或 `head/chest/legs/feet/body/offhand`。
+- 原版开箱界面使用复制的物品，拦截点击、拖拽与快捷移动；不会修改目标玩家的物品。
+- 控制台可以查看聊天输出；打开箱子界面需要游戏内玩家。
 
-示例：
+## 数据与边界
 
-```
-/invsee sixihappy       → 第 1 页
-/invsee zhang1322 3     → 第 3 页
-```
+在线查询直接读取玩家实体；离线名字从服务器 `usercache.json` 解析 UUID，随后调用原版 `PlayerList.loadPlayerData` 读取存档。无法解析名字或没有可读存档时会提示错误，不会伪造一个空背包。
 
-Tab 补全会同时提示在线玩家和 usercache 里最近上线的名字。
+在线、离线、聊天与 GUI 共用 `SnapshotReader`。物品通过原版 `ItemStack.CODEC` 和服务器注册表解码，网络保留完整组件；所有展示使用脱离真实背包的副本。
 
-## 权限
+每名查询者至少间隔 500 ms 发起查询。超过网络大小限制的数据会提示使用聊天指令分项查看。界面不提供取出、放入或修改物品的功能。
 
-- 需要 **OP 权限等级 ≥ 2**（对应原版 `GAMEMASTERS`），即普通 OP 即可。
-- 控制台 / RCON 默认放行。
-- 未满足权限时指令不会出现在该玩家命令里（brigadier requires 过滤）。
+## 构建与验证
 
-## 双端（客户端界面版，B 方案）
-
-同一份 jar 同时是**服务端 mod** 和**客户端 mod**（`environment: "*"`，服务端只跑服务端部分）。
-
-客户端（OP 专用）：
-
-1. 客户端 mods 也放同一个 `eun-invsee-1.0.0.jar`。
-2. 进服后按 **P** 打开「EUN 背包查看」界面。
-3. 顶部输入玩家名 → 点「查询」（或回车）。
-4. 列表展示：快捷栏/背包/装备/副手/末影箱；带 `[箱·点开]` 的行点击进入盒内查看；第一行「◀ 返回」回到总览。
-5. 鼠标悬停物品行看详情（ID/耐久/附魔），滚轮翻页。
-6. 数据来自服务端：**在线玩家=实时**，**离线玩家=该服最后保存的存档**（头部显示存档时间）。
-
-要求：查询者 OP≥2，且所连服务器装有本 mod（否则会提示失败）。
-
-聊天版（任何设备可用，无需客户端 mod）同样保留：`/invsee <玩家> [页码]`，物品行的 `[开箱]` 点击会在客户端弹出**只读容器界面**（原版箱子界面，可悬停看物品中文名/附魔，点不动任何东西）。
-
-## 数据说明（26.2 存档格式，DataVersion 4903）
-
-26.2 的玩家数据在 `world/players/data/`，旧 `world/playerdata/` 是历史遗留。
-玩家 `.dat` 根标签结构：
-
-- `Inventory`：36 格（快捷栏 0..8 + 背包 9..35），每格条目含 `Slot/Byte` + 物品
-  `{id, count, components}`，空格子可能整体省略，也可能以 `minecraft:air` 存储；
-  解析时对 `minecraft:air` 与 `count<=0` 一律跳过。
-- `equipment`：`{head, chest, legs, feet, body, offhand}` 装备/副手。
-- `EnderItems`：末影箱 27 格（同样条目结构）。
-- `SelectedItemSlot`：当前选中快捷栏。
-
-解析细节：
-
-- 物品显示名：优先 `components.minecraft:custom_name`（离线为纯文本；在线用
-  `ItemStack.getHoverName()`），否则用物品注册表 `descriptionId()` 生成
-  translatable 组件，交给客户端按语言环境渲染（OP 中文端自动显示中文）。
-- 附魔：`components.minecraft:enchantments`（在线从 `ItemEnchantments` 取），
-  逐条转 translatable 附魔名 + 罗马数字等级。
-- 潜影盒等容器：`components.minecraft:container` 列表，统计非空格数与内含概要。
-- 悬停第一行永远给出物品注册 ID，方便定位模组物品。
-
-## 技术要点 / 构建
-
-- 纯服务端，无 mixin、无客户端文件；`environment: server`。
-- 依赖：fabric-api ≥0.156.0+26.2、fabric-loader ≥0.19.3、MC 26.2、Java ≥25。
-- 离线玩家名 → UUID：读 `server/usercache.json`（Velocity 现代转发下记录的是
-  真实正版 UUID）；找不到会给出相近名字提示。
-- 离线数据读取走服务端官方通道 `PlayerList.loadPlayerData(NameAndId)`
-  （内部含 DataFixer 升级，旧档也能读成当前格式），随后纯 NBT 只读解析。
-
-构建：
-
-```
-set JAVA_HOME=F:\java\temurin25-win
-gradlew --offline build
-产物: build/libs/eun-invsee-1.0.0.jar
+```powershell
+# JAVA_HOME 指向 Java 25+
+.\gradlew.bat build
 ```
 
-## 部署
+Linux/macOS：
 
-1. 把 `build/libs/eun-invsee-1.0.0.jar` 放进目标服 `mods/` 目录。
-2. **重启该服**（服务端 mod 装完必须重启生效；重启前请确认低峰）。
-3. 进服后用 `/invsee <玩家>` 验证在线读取；下线玩家需先在 usercache 中有记录
-   （本服玩家都满足）。
+```sh
+./gradlew build
+```
 
-部署现状（2026-09-09 晚，等待重启许可）：
-- jar 已预放置：`F:\服务器文件\test_26.2\server\mods\eun-invsee-1.0.0.jar`
-- 测试客户端已预放置：`...\测试客户端\.minecraft\versions\26.2-Fabric 0.19.3-testA\mods\eun-invsee-1.0.0.jar`
-- 只差：确认后重启测试服 → P 键界面 / /invsee 实机验证。
+产物：`build/libs/eun-invsee-1.1.0.jar`。测试报告：`build/reports/tests/test/index.html`。
 
-## 局限 / 后续可加
+中文 Windows 路径下，若测试启动日志出现乱码路径和 “couldn't locate the game”，让 Gradle 使用本机原生编码；当前中文 Windows 环境验证使用：
 
-- 只展示，不支持"看一眼之后把界面当容器拖拽"的 GUI（如需 GUI 预览可后续做
-  服务端打开的只读容器界面）。
-- 离线数据是**最后保存**而非"当前"；在线玩家永远是实时的。
-- 如需查指定 UUID 或模糊匹配自动补全/通配，可再扩展子命令。
+```powershell
+.\gradlew.bat build --console=plain '-Dorg.gradle.jvmargs=-Xmx2G -Dfile.encoding=GBK'
+```
+
+测试覆盖离线 NBT → 网络 → 客户端的物品组件与槽位、在线读取副本、嵌套容器、空潜影盒、只读数据隔离、右键/返回操作、过期响应、查询超时以及多种 GUI 尺寸。
+
+`build/preview/` 的 PNG 由生产界面的绘制调用配合软件渲染器和示例数据生成，用于布局检查；它们不是游戏内 GPU 截图，字体与部分物品图标近似显示。
+
+## 代码入口
+
+| 文件 | 职责 |
+| --- | --- |
+| `data/InventorySnapshot` | 固定槽位快照、完整物品协议、容器副本 |
+| `service/SnapshotReader` | 在线与离线数据读取、聊天位置码定位 |
+| `server/InvseeServerNet` | 权限、查询频率、版本检查、服务端响应 |
+| `client/net/ClientInvseeNet` | 网络能力检查与响应分发 |
+| `client/gui/InvseeScreen` | 查询、真实物品展示、右键容器预览 |
+| `client/gui/InvseeLayout` / `InvseeTheme` | 自适应布局与统一界面样式 |
+| `service/PlayerViews` / `BoxOpener` | 聊天输出与原版只读容器界面 |
+
+## 许可证
+
+MIT。

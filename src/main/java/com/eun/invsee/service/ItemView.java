@@ -4,9 +4,6 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
@@ -23,8 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 单个物品槽位的只读视图：在线(ItemStack) 与 离线(存档 NBT) 统一成同一模型。
- * 同时供聊天渲染与客户端界面 JSON 使用。
+ * 聊天指令使用的物品摘要。在线与离线物品均由 SnapshotReader 解码。
  */
 public final class ItemView {
 
@@ -93,54 +89,6 @@ public final class ItemView {
     private static String customTextOf(ItemStack stack) {
         Component c = stack.getComponents().get(DataComponents.CUSTOM_NAME);
         return c == null ? null : stripCodes(c.getString());
-    }
-
-    // ---------- 离线：由存档里的物品 NBT 构建 ----------
-
-    public static ItemView fromItemCompound(CompoundTag item, MinecraftServer server) {
-        String id = item.getStringOr("id", "minecraft:air");
-        int count = item.getIntOr("count", 1);
-        CompoundTag comps = item.getCompoundOrEmpty("components");
-
-        String customName = comps.contains("minecraft:custom_name")
-                ? comps.getStringOr("minecraft:custom_name", null) : null;
-        Component display = nameOf(id, customName, server);
-
-        List<EnchantInfo> enchants = new ArrayList<>();
-        if (comps.contains("minecraft:enchantments")) {
-            CompoundTag ench = comps.getCompoundOrEmpty("minecraft:enchantments");
-            for (String key : ench.keySet()) {
-                int lv = ench.getIntOr(key, 0);
-                if (lv > 0) {
-                    enchants.add(new EnchantInfo(key, lv));
-                }
-            }
-        }
-        int damage = comps.contains("minecraft:damage") ? comps.getIntOr("minecraft:damage", -1) : -1;
-
-        List<InnerItem> inner = new ArrayList<>();
-        int innerTotal = 0;
-        if (comps.contains("minecraft:container")) {
-            ListTag container = comps.getListOrEmpty("minecraft:container");
-            for (int i = 0; i < container.size(); i++) {
-                Tag t = container.get(i);
-                if (!(t instanceof CompoundTag entry) || !entry.contains("item")) {
-                    continue;
-                }
-                CompoundTag innerItem = entry.getCompoundOrEmpty("item");
-                String iid = innerItem.getStringOr("id", "minecraft:air");
-                if (iid.equals("minecraft:air")) {
-                    continue;
-                }
-                innerTotal++;
-                CompoundTag icomps = innerItem.getCompoundOrEmpty("components");
-                String icn = icomps.contains("minecraft:custom_name")
-                        ? icomps.getStringOr("minecraft:custom_name", null) : null;
-                inner.add(new InnerItem(iid, icn, innerItem.getIntOr("count", 1),
-                        nameOf(iid, icn, server)));
-            }
-        }
-        return new ItemView(id, count, display, customName, damage, enchants, inner, innerTotal);
     }
 
     // ---------- 渲染（聊天） ----------

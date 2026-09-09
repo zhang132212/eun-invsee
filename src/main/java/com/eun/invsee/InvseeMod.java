@@ -3,10 +3,8 @@ package com.eun.invsee;
 import com.eun.invsee.command.InvseeCommand;
 import com.eun.invsee.net.InvseePackets;
 import com.eun.invsee.server.InvseeServerNet;
-import net.fabricmc.api.EnvType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
-import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * EUN Invsee - 背包查看（双端）。服务端：/invsee 聊天版 + 为客户端 GUI 提供数据；客户端另有界面。
@@ -23,9 +21,7 @@ public class InvseeMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, dedicated, environment) ->
                 InvseeCommand.register(dispatcher));
 
-        // 服务端进程（非客户端环境）才接收 GUI 请求
-        if (FabricLoader.getInstance().getEnvironmentType() == EnvType.SERVER) {
-            InvseeServerNet.registerReceiver();
-        }
+        // Also register for the integrated server in single-player / LAN worlds.
+        InvseeServerNet.registerReceiver();
     }
 }

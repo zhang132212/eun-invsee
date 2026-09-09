@@ -7,14 +7,14 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
 /**
- * 双端自定义协议。双向各携带一条 UTF-8 JSON：
- *  C2S req  = {"target":"玩家名"}
- *  S2C resp = {"ok":true,...} / {"ok":false,"err":"..."}
- * 与 command-gui-server 的做法一致：两侧可独立编译，未知字段各自忽略。
+ * Versioned UTF-8 JSON payloads. Requests and responses carry a correlation ID;
+ * successful responses contain fixed-slot arrays encoded with ItemStack.CODEC.
  */
 public final class InvseePackets {
 
     public static final String CHANNEL_NS = "eun_invsee";
+    // At most 3 UTF-8 bytes per Java character; stay below the vanilla S2C payload limit.
+    public static final int MAX_RESPONSE_CHARS = 262144;
 
     /** 客户端→服务端：请求查看某玩家。 */
     public record RequestPayload(String json) implements CustomPacketPayload {
@@ -24,8 +24,8 @@ public final class InvseePackets {
 
         public static final StreamCodec<RegistryFriendlyByteBuf, RequestPayload> CODEC =
                 StreamCodec.of(
-                        (buf, payload) -> buf.writeUtf(payload.json(), 65536),
-                        buf -> new RequestPayload(buf.readUtf(65536)));
+                        (buf, payload) -> buf.writeUtf(payload.json(), 1024),
+                        buf -> new RequestPayload(buf.readUtf(1024)));
 
         @Override
         public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
@@ -41,8 +41,8 @@ public final class InvseePackets {
 
         public static final StreamCodec<RegistryFriendlyByteBuf, ResponsePayload> CODEC =
                 StreamCodec.of(
-                        (buf, payload) -> buf.writeUtf(payload.json(), 1048576),
-                        buf -> new ResponsePayload(buf.readUtf(1048576)));
+                        (buf, payload) -> buf.writeUtf(payload.json(), MAX_RESPONSE_CHARS),
+                        buf -> new ResponsePayload(buf.readUtf(MAX_RESPONSE_CHARS)));
 
         @Override
         public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
